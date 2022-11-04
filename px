@@ -1,0 +1,530 @@
+#!/usr/bin/env bash
+
+# GLOBAL VARIABLES
+
+PROGRAM=$(basename "${BASH_SOURCE[0]}")
+COMMAND="$1"
+
+## EXPORTED VARIABLES
+
+export __px_dryrun=false
+export __px_copy=false
+export __px_tags_from_xmp=false
+
+# FUNCTION DEFINITIONS
+
+_message(){ printf "%s\n" "$@" >&2; }
+_warn(){ printf "[!]: %s\n" "$@" >&2; }
+_die(){ _warn "$@"; exit 1; }
+
+_usage(){
+    local __desc=(
+        "px: a toolset for moving pictures around"
+        ""
+        "usage: $PROGRAM <command> [options] <args>"
+        ""
+        "commands:"
+    )
+    _message "${__desc[@]}"
+    _px_cmd_commands | awk '{print "    "$0}' >&2
+}
+
+_px_run(){
+    if [ "$__px_dryrun" = true ]; then
+        printf "%s\n" "$*"
+    else
+        "$@"
+    fi
+}
+
+__get_new_basename(){
+    printf "%s_%s" "$(__get_datetime "${1:?not set}")" "$(__get_md5 "$1")"
+}
+
+__get_datetime(){
+    local __format="${2:-%Y%m%dT%H%M%S%z}"
+    exiftool -s -S \
+        -d "$__format" \
+        -datetimeoriginal \
+        -createdate \
+        "$1" \
+        | head -n 1
+}
+
+__get_md5(){
+    local __trunc=${2:-6}
+    md5 -q "$1" | head -c $__trunc
+}
+
+__list_media_files(){
+    exiftool -r --ext aae --ext xmp \
+        -s -S -q \
+        -p '$directory/$filename' \
+        "$@"
+}
+
+__parse_filepath(){
+    local __filepath="${1:?no filepath given}"
+    __e=${__filepath##*.}  # foo/bar.tar.gz -> gz
+    __d=$(dirname "$__filepath")
+    __b=$(basename "$__filepath" ".$__e")
+    __x=$__f.xmp
+    __a="$__d/$__b.AAE"
+
+    if [ "${__px_tags_from_xmp:?not set}" = true ]; then
+        __s=$__x
+    else
+        __s=$__f
+    fi
+}
+
+__rename_from_date(){
+    local __f="${1:?no input file given}"
+    local __e __d __b __x __a __s
+
+    __parse_filepath "$__f"
+
+    local __newb=$(__get_new_basename "${__s:?not set}")
+
+    local __cmd
+    [ "${__px_copy:?not set}" = true ] && __cmd=cp || __cmd=mv
+
+    _px_run $__cmd -nv "$__f" "$__d/$__newb.$__e"
+    _px_run $__cmd -nv "$__x" "$__d/$__newb.$__e.xmp"
+    _px_run $__cmd -nv "$__a" "$__d/$__newb.AAE"
+}
+
+_px_cmd_date2filename(){
+    local _px_cmd_usage=(
+        "$PROGRAM $COMMAND:"
+        "    renames media files and associated sidecars with using"
+        "    the original or created datetime (if available) and a "
+        "    truncated md5 hash in the format: YYYYmmddTHHMMSS-xxxxxx"
+        ""
+        "usage: $PROGRAM $COMMAND [options] FILES OR DIRS"
+        ""
+        "options:"
+        "    -h  help"
+        "    -d  dry run"
+        "    -c  copy instead of move"
+        "    -x  read tags from xmp sidecar instead of image file"
+    )
+
+    local OPTIND OPTARG _opts
+    while getopts ":hdcx" _opts; do
+        case $_opts in
+            h)
+                _message "${_px_cmd_usage[@]}"
+                return 0
+                ;;
+            d)
+                __px_dryrun=true
+                ;;
+            c)
+                __px_copy=true
+                ;;
+            x)
+                __px_tags_from_xmp=true
+                ;;
+            *)
+                _warn "invalid option: -$OPTARG"
+                _warn "${_px_cmd_usage[@]}"
+                return 1
+                ;;
+        esac
+    done
+    shift $((OPTIND-1))
+
+    __list_media_files "$@" | parallel -n 1 __rename_from_date
+}
+
+__move_by_Y_m(){
+    local __f="${1:?no input file given}"
+    local __e __d __b __x __a __s
+
+    # needed in case __px_tags_from_xmp
+    __parse_filepath "$__f"
+
+    local __newd=$(__get_datetime "${__s:?not set}" '%Y-%m')
+
+    __move_with_sidecar "$__f" "$__d/$__newd"
+}
+
+_px_cmd_by_year_month(){
+    local _px_cmd_usage=(
+        "$PROGRAM $COMMAND:"
+        "    puts the media and associated sidecars into a subdirectory"
+        "    using the original or created datetime if available,"
+        "    e.g., foo/bar/baz.jpg -> foo/bar/YYYY-mm/baz.jpg"
+        ""
+        "usage: $PROGRAM $COMMAND [options] FILES OR DIRS"
+        ""
+        "options:"
+        "    -h  help"
+        "    -d  dry run"
+        "    -c  copy instead of move"
+        "    -x  read tags from xmp sidecar instead of image file"
+    )
+
+    local OPTIND OPTARG _opts
+    while getopts ":hdcx" _opts; do
+        case $_opts in
+            h)
+                _message "${_px_cmd_usage[@]}"
+                return 0
+                ;;
+            d)
+                __px_dryrun=true
+                ;;
+            c)
+                __px_copy=true
+                ;;
+            x)
+                __px_tags_from_xmp=true
+                ;;
+            *)
+                _warn "invalid option: -$OPTARG"
+                _warn "${_px_cmd_usage[@]}"
+                return 1
+                ;;
+        esac
+    done
+    shift $((OPTIND-1))
+
+    __list_media_files "$@" | parallel -n 1 __move_by_Y_m
+}
+
+__move_with_sidecar(){
+    local __f="${1:?no input file given}"
+    local __newd="${2:?no destination dir given}"
+    local __e __d __b __x __a __s
+
+    __parse_filepath "$__f"
+
+    local __cmd
+    [ "${__px_copy:?not set}" = true ] && __cmd=cp || __cmd=mv
+
+    _px_run mkdir -p "$__newd"
+
+    _px_run $__cmd -nv "$__f" "$__newd/$__b.$__e"
+    _px_run $__cmd -nv "$__x" "$__newd/$__b.$__e.xmp"
+    _px_run $__cmd -nv "$__a" "$__newd/$__b.AAE"
+}
+
+_px_cmd_move(){
+    local _px_cmd_usage=(
+        "$PROGRAM $COMMAND:"
+        "    moves media and associated sidecars to a given destination directory"
+        ""
+        "usage: $PROGRAM $COMMAND [options] [--] FILES OR DIRS... DESTINATION_DIR"
+        ""
+        "options:"
+        "    -h  help"
+        "    -d  dry run"
+        "    -c  copy instead of move"
+        ""
+        "DESTINATION_DIR"
+        "    move files to here"
+        ""
+        "FILES OR DIRS..."
+        "    a list of files or directories"
+    )
+
+    local OPTIND OPTARG _opts
+    while getopts ":hdc" _opts; do
+        case $_opts in
+            h)
+                _message "${_px_cmd_usage[@]}"
+                return 0
+                ;;
+            d)
+                __px_dryrun=true
+                ;;
+            c)
+                __px_copy=true
+                ;;
+            *)
+                _warn "invalid option: -$OPTARG"
+                _warn "${_px_cmd_usage[@]}"
+                return 1
+                ;;
+        esac
+    done
+    shift $((OPTIND-1))
+
+    [ $# -lt 2 ] && _die "No destination specified"
+    export _move_destination=${@: -1}
+    set -- "${@:1:$#-1}"
+
+    __list_media_files "$@" | parallel -n 1 __move_with_sidecar "{}" "$_move_destination"
+}
+
+__list_dates(){
+    exiftool -r -s -f -csv -csvDelim "\t" \
+        -if 'not ($CreateDate or $DateTimeOriginal)' \
+        -CreateDate -DatetimeOriginal \
+        -FileModifyDate -FileCreateDate \
+        "$1"
+}
+
+_px_cmd_list_dates(){
+    local _px_cmd_usage=(
+        "$PROGRAM $COMMAND:"
+        "    lists the various \"creation\" dates for each file"
+        ""
+        "usage: $PROGRAM $COMMAND [options] FILES OR DIRS..."
+        ""
+        "options:"
+        "    -h  help"
+        ""
+    )
+
+    local OPTIND OPTARG _opts
+    while getopts ":h" _opts; do
+        case $_opts in
+            h)
+                _message "${_px_cmd_usage[@]}"
+                return 0
+                ;;
+            *)
+                _warn "invalid option: -$OPTARG"
+                _warn "${_px_cmd_usage[@]}"
+                return 1
+                ;;
+        esac
+    done
+    shift $((OPTIND-1))
+
+    __list_media_files "$@" | parallel -n 1 __list_dates
+}
+
+__remove_xmp_regions(){
+    exiftool -ext xmp -r '-XMP-mwg-rs:all=' "$1"
+}
+
+_px_cmd_untag_faces(){
+    local _px_cmd_usage=(
+        "$PROGRAM $COMMAND:"
+        "    removes XMP-mwg-rs tags set by DigiKam to label faces"
+        ""
+        "usage: $PROGRAM $COMMAND [options] FILES OR DIRS..."
+        ""
+        "options:"
+        "    -h  help"
+        "    -y  skip confirmation to '-delete_original'"
+        ""
+    )
+
+    local OPTIND OPTARG _opts _skip_confirmation=false
+    while getopts ":hy" _opts; do
+        case $_opts in
+            h)
+                _message "${_px_cmd_usage[@]}"
+                return 0
+                ;;
+            y)
+                _skip_confirmation=true
+                ;;
+            *)
+                _warn "invalid option: -$OPTARG"
+                _warn "${_px_cmd_usage[@]}"
+                return 1
+                ;;
+        esac
+    done
+    shift $((OPTIND-1))
+
+    __list_media_files "$@" | parallel -n 1 __remove_xmp_regions
+
+    if [ "$_skip_confirmation" != true ]; then
+        local _yn
+        read -t 10 -r -n 1 \
+            -p "Remove '_original' backups? (y/N): " _yn
+            if [[ "$_yn" = [Yy]* ]]; then
+                _message "" "Deleting '_original backups..." ""
+            else
+                return
+            fi
+    fi
+
+    exiftool -r -ext xmp -delete_original "$@"
+}
+
+_px_cmd_tag_faces(){
+    _warn "!"
+    _warn "! not implemented"
+    _warn "!"
+    _warn "! usage: $PROGRAM $COMMAND [--help|-h|[--known-faces KNOWN_FACES_DIR] [--tolerance FLOAT]] [FILE OR DIRS...]"
+    _warn "!"
+}
+
+_px_cmd_auto(){
+    local _px_cmd_usage=(
+        "$PROGRAM $COMMAND:"
+        "    renames, organizes, and moves media plus associated sidecars to"
+        "    a given destination directory"
+        ""
+        "usage: $PROGRAM $COMMAND [options] [--] FILES OR DIRS... DESTINATION_DIR"
+        ""
+        "options:"
+        "    -h  help"
+        "    -d  dry run"
+        "    -c  copy instead of move"
+        "    -x  read tags from xmp sidecar"
+        "    -y  skip confirmation"
+        ""
+        "DESTINATION_DIR"
+        "    move files to here"
+        ""
+        "FILES OR DIRS..."
+        "    a list of files or directories"
+    )
+
+    local OPTIND OPTARG _opts _skip_confirmation=false
+    while getopts ":hdcyx" _opts; do
+        case $_opts in
+            h)
+                _message "${_px_cmd_usage[@]}"
+                return 0
+                ;;
+            d)
+                __px_dryrun=true
+                ;;
+            c)
+                __px_copy=true
+                ;;
+            x)
+                __px_tags_from_xmp=true
+                ;;
+            y)
+                _skip_confirmation=true
+                ;;
+            *)
+                _warn "invalid option: -$OPTARG"
+                _warn "${_px_cmd_usage[@]}"
+                return 1
+                ;;
+        esac
+    done
+    shift $((OPTIND-1))
+
+    [ $# -lt 2 ] && _die "No destination specified"
+    local _move_destination=${@: -1}
+    set -- "${@:1:$#-1}"
+
+    if [ "$_skip_confirmation" != true ]; then
+        local _yn
+        read -t 10 -r -n 1 \
+            -p "Rename, organize by Y-m, and move $@ to $_move_destination? (y/N): " _yn
+            if [[ "$_yn" = [Yy]* ]]; then
+                _message ""
+                _message "Proceeding..."
+            else
+                _warn ""
+                _die "Aborting!"
+            fi
+    fi
+
+    _px_cmd_date2filename "$@"
+    _px_cmd_by_year_month "$@"
+
+    local __cmd
+    [ "${__px_copy:?not set}" = true ] && __cmd=cp || __cmd=mv
+
+    local _move_source
+    for _move_source in "$@"; do
+        local _i
+        for _i in "$_move_source"/[0-9][0-9][0-9][0-9]-[0-9][0-9]; do
+            local _j="$_move_destination/$(basename "$_i")"
+            _px_run mkdir -p "$_j"
+            _px_run $__cmd -nv "$_i"/* "$_j"/
+        done
+    done
+}
+
+_px_cmd_commands(){
+    local __commands=(
+        $(egrep -o '^_px_cmd_[[:alnum:]_]+' "${BASH_SOURCE[0]}" | cut -c 9- | tr '_' '-')
+        $(_px_list_extra_commands)
+        help
+    )
+    printf "%s\n" "${__commands[@]}"
+}
+
+## EXPORTED FUNCTIONS
+
+export -f __move_with_sidecar __rename_from_date __move_by_Y_m
+export -f __list_dates __remove_xmp_regions
+export -f __get_new_basename __get_datetime __get_md5
+export -f __parse_filepath
+export -f _px_run
+export -f _warn _die
+
+
+### BEGIN Extras
+
+_PX_EXTRAS_DIR="${_PX_EXTRAS_DIR:-${HOME}/.local/share/px/extras}"
+
+_px_list_extra_commands(){
+    find "${_PX_EXTRAS_DIR:?not set}" -type f -perm +111 -name 'px_*.bash' -exec basename "{}" \; 2> /dev/null \
+        | sed -Ee 's/^px_(.+)\.bash$/\1/' -e '/^$/d'
+}
+
+_px_extra_command_or_error(){
+    _px_extra_lib="$_PX_EXTRAS_DIR/px_$COMMAND.bash"
+    if [ -f "$_px_extra_lib" ] && [ -x "$_px_extra_lib" ]; then
+        source "$_px_extra_lib" "$@"
+    else
+        [ -n "$COMMAND" ] && _warn "unexpected command '$COMMAND'"
+        _usage
+        exit 1
+    fi
+}
+
+### END Extras
+
+
+# MAIN
+
+case "$COMMAND" in
+    commands)
+        _px_cmd_commands
+        exit 0
+        ;;
+    date2filename)
+        shift
+        _px_cmd_date2filename "$@"
+        ;;
+    by-year-month)
+        shift
+        _px_cmd_by_year_month "$@"
+        ;;
+    move)
+        shift
+        _px_cmd_move "$@"
+        ;;
+    list-dates)
+        shift
+        _px_cmd_list_dates "$@"
+        ;;
+    untag-faces)
+        shift
+        _px_cmd_untag_faces "$@"
+        ;;
+    tag-faces)
+        shift
+        _px_cmd_tag_faces "$@"
+        ;;
+    auto)
+        shift
+        _px_cmd_auto "$@"
+        ;;
+    -h|-help|--help|help)
+        _usage
+        exit 0
+        ;;
+    *)
+        shift
+        _px_extra_command_or_error "$@"
+        ;;
+esac
